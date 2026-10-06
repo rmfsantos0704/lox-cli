@@ -12,11 +12,19 @@ export async function getGitStatus() {
   }
 }
 
+export async function getGitDiff() {
+  try {
+    const diff = await git.diff();
+    return diff;
+  } catch (error) {
+    console.error('Error fetching git diff:', error.message);
+    return '';
+  }
+}
+
 export async function commitChanges(message) {
   try {
-    // Adds all modified and untracked files
     await git.add('.');
-    // Commits with the generated conventional message
     await git.commit(message);
     return true;
   } catch (error) {
