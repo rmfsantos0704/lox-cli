@@ -34,3 +34,5 @@ export async function configCommand() {
   await fs.writeFile(CONFIG_PATH, JSON.stringify(answers, null, 2));
   console.log(chalk.cyan(`\n⚙️ Configuration saved to ${CONFIG_PATH}`));
 }
+
+export function configCommand() {}
