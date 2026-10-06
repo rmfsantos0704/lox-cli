@@ -113,3 +113,6 @@ export async function releaseCommand() {
     console.log(chalk.red(`❌ Release failed: ${error.message}`));
   }
 }
+
+console.log(chalk.cyan('Pushing release and tags to GitHub...'));
+await execAsync('git push --follow-tags');
