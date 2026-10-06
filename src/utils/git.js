@@ -4,8 +4,7 @@ const git = simpleGit();
 
 export async function getGitStatus() {
   try {
-    const status = await git.status();
-    return status;
+    return await git.status();
   } catch (error) {
     console.error('Error fetching git status:', error.message);
     process.exit(1);
@@ -14,17 +13,16 @@ export async function getGitStatus() {
 
 export async function getGitDiff() {
   try {
-    const diff = await git.diff();
-    return diff;
+    return await git.diff();
   } catch (error) {
-    console.error('Error fetching git diff:', error.message);
     return '';
   }
 }
 
-export async function commitChanges(message) {
+// NEW: Accepts an array of specific file paths to stage and commit independently
+export async function commitSpecificFiles(filePaths, message) {
   try {
-    await git.add('.');
+    await git.add(filePaths);
     await git.commit(message);
     return true;
   } catch (error) {
