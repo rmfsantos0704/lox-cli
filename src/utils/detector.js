@@ -1,4 +1,5 @@
 import path from 'path';
+import chalk from 'chalk';
 
 // Determines the type of change for a SINGLE file
 function getFileType(filePath, diffText = '') {
@@ -50,19 +51,26 @@ export async function generateDescription(files = [], diffText = '') {
           prompt: `Analyze this git diff and summarize the main code/feature change in 3 to 8 words using imperative mood (e.g. "add user login authentication" or "fix null pointer error"). Do not include quotes, markdown, or punctuation:\n\n${diffText.slice(0, 4000)}`,
           stream: false
         }),
-        signal: AbortSignal.timeout(3000) 
+        signal: AbortSignal.timeout(15000)
       });
 
-      if (response.ok) {
+if (response.ok) {
         const data = await response.json();
         const aiDescription = data.response?.trim().toLowerCase();
         
         if (aiDescription) {
-           return aiDescription.replace(/^adds\b/, 'add').replace(/^fixes\b/, 'fix');
+           const cleaned = aiDescription.replace(/^adds\b/, 'add').replace(/^fixes\b/, 'fix');
+           
+           // Print debug log
+           console.log(chalk.magenta(`🧠 [Ollama AI Active]: "${cleaned}"`));
+           
+           return cleaned;
         }
       }
+      
     } catch (err) {
       // Fallback silently if Ollama times out
+      console.log(chalk.red(`❌ [Ollama Error]: ${err.message}`));
     }
   }
 
