@@ -27,8 +27,9 @@ export function groupFilesByType(files = [], diffText = '') {
   });
   return groups;
 }
+
 export function detectScope(files = []) {
-  if (!files || files.length === 0) return ''; // Fixed potential crash on null
+  if (files.length === 0) return '';
   const names = files.map(f => path.parse(f.path).name);
   if (names.length === 1) return names[0];
   if (names.length <= 3) return names.join(', ');
