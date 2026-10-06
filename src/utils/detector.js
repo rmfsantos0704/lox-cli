@@ -99,5 +99,3 @@ export async function generateDescription(files = [], diffText = '') {
 
   return `update ${files.length} project files`;
 }
-
-// fix the branch fallback issue
