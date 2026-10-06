@@ -1,0 +1,4 @@
+{
+  "runPreCommitChecks": true,
+  "checkCommand": "node -v"
+}

@@ -1,8 +1,9 @@
 import inquirer from 'inquirer';
 import chalk from 'chalk';
 import { formatCommitMessage } from '../utils/formatter.js';
-import { commitSpecificFiles, getGitStatus, getGitDiff } from '../utils/git.js';
+import { commitSpecificFiles, getGitStatus, getGitDiff, getCurrentBranch } from '../utils/git.js';
 import { groupFilesByType, detectScope, generateDescription } from '../utils/detector.js';
+import { getConfig, runChecks } from '../utils/config.js';
 
 export async function commitCommand() {
   const status = await getGitStatus();
@@ -12,29 +13,43 @@ export async function commitCommand() {
     return;
   }
 
+  // 1. Load Config & Run Checks
+  const config = getConfig();
+  if (config.runPreCommitChecks && config.checkCommand) {
+    const passed = await runChecks(config.checkCommand);
+    if (!passed) {
+      console.log(chalk.red.bold('Commit aborted due to failing checks.'));
+      process.exit(1);
+    }
+  }
+
+  // 2. Branch Name Auto-Detection
+  const branchName = await getCurrentBranch();
+  const branchMatch = branchName.match(/^(feat|fix|docs|style|refactor|test|chore)\/([^/]+)/);
+  const branchType = branchMatch ? branchMatch[1] : null;
+  const branchScope = branchMatch ? branchMatch[2] : null;
+
   const diff = await getGitDiff();
-  
-  // Group the modified files by their predicted commit type
   const groupedFiles = groupFilesByType(status.files, diff);
   const groupCount = Object.keys(groupedFiles).length;
 
   console.log(chalk.cyan(`\n🤖 Auto-detected ${groupCount} different type(s) of changes. Preparing separate commits...\n`));
 
-  // Loop through each group (e.g., 'feat', then 'docs')
-  for (const [type, files] of Object.entries(groupedFiles)) {
-    console.log(chalk.bgMagenta.bold(`\n --- Committing [${type}] Changes --- `));
+  for (const [detectedType, files] of Object.entries(groupedFiles)) {
+    console.log(chalk.bgMagenta.bold(`\n --- Committing [${detectedType}] Changes --- `));
     files.forEach(f => console.log(chalk.gray(`  • ${f.path}`)));
 
-    // Generate scope & description for THIS specific group of files
-    const detectedScope = detectScope(files);
-    const detectedDescription = generateDescription(files, diff);
+    // Use branch-detected scope/type if available, otherwise fall back to file analysis
+    const defaultType = branchType && branchType === detectedType ? branchType : detectedType;
+    const defaultScope = branchScope || detectScope(files);
+    const defaultDescription = generateDescription(files, diff);
 
     const commitPrompts = [
       {
         type: 'select',
         name: 'type',
-        message: 'Confirm the type of change for these files:',
-        default: type,
+        message: 'Confirm the type of change:',
+        default: defaultType,
         choices: [
           { name: 'feat:     A new feature', value: 'feat' },
           { name: 'fix:      A bug fix', value: 'fix' },
@@ -49,30 +64,42 @@ export async function commitCommand() {
         type: 'input',
         name: 'scope',
         message: 'Enter the scope of this change [optional]:',
-        default: detectedScope
+        default: defaultScope
       },
       {
         type: 'input',
         name: 'description',
         message: 'Write a short description of the change:',
-        default: detectedDescription,
+        default: defaultDescription,
         validate: (input) => input.length > 0 ? true : 'Description cannot be empty.'
+      },
+      {
+        type: 'confirm',
+        name: 'isBreaking',
+        message: 'Does this commit introduce a breaking change?',
+        default: false
+      },
+      {
+        type: 'input',
+        name: 'breakingDesc',
+        message: 'Describe the breaking change:',
+        when: (answers) => answers.isBreaking,
+        validate: (input) => input.length > 0 ? true : 'You must provide a description for a breaking change.'
       }
     ];
 
     const answers = await inquirer.prompt(commitPrompts);
     const commitMsg = formatCommitMessage(answers);
     
-    // Stage and commit ONLY the files belonging to this group
     const filePaths = files.map(f => f.path);
     const success = await commitSpecificFiles(filePaths, commitMsg);
     
     if (success) {
-      console.log(chalk.green(`✔ Committed: "${commitMsg}"`));
+      console.log(chalk.green(`✔ Committed: "${commitMsg.split('\n')[0]}"`));
     } else {
-      console.log(chalk.red(`✖ Failed to commit [${type}] files.`));
+      console.log(chalk.red(`✖ Failed to commit [${detectedType}] files.`));
     }
   }
 
-  console.log(chalk.green.bold('\n🎉 All separated changes have been committed successfully! You can now run `git push`.'));
+  console.log(chalk.green.bold('\n🎉 All separated changes have been committed successfully!'));
 }

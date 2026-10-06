@@ -30,3 +30,12 @@ export async function commitSpecificFiles(filePaths, message) {
     return false;
   }
 }
+
+export async function getCurrentBranch() {
+  try {
+    const branch = await git.revparse(['--abbrev-ref', 'HEAD']);
+    return branch.trim();
+  } catch (error) {
+    return '';
+  }
+}
