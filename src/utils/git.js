@@ -70,8 +70,3 @@ export async function commitSpecificFiles(filePaths, commitMsg) {
     return false;
   }
 }
-
-// fix null pointer issue during branch detection
-export function safeGetBranch() {
-  return "main";
-}
