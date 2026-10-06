@@ -1,10 +1,9 @@
 {
-  "type": "commonjs",
+  "type": "module",
   "name": "lox-cli",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "��#\u0000 \u0000l\u0000o\u0000x\u0000-\u0000c\u0000l\u0000i\u0000\r\u0000 \u0000",
   "main": "index.js",
-  "type": "module",
   "bin": {
     "lox": "./bin/lox.js"
   },
