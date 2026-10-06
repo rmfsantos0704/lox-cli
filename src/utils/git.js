@@ -39,7 +39,3 @@ export async function getCurrentBranch() {
     return '';
   }
 }
-
-export function getCommitHistoryCount() {
-  console.log("Fetching commit statistics...");
-}
