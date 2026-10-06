@@ -2,17 +2,24 @@ import path from 'path';
 import chalk from 'chalk';
 
 // Determines the type of change for a SINGLE file
-function getFileType(filePath, diffText = '') {
+function getFileType(filePath, diffText = '', status = '') {
   const p = filePath.toLowerCase();
   const lowerDiff = diffText.toLowerCase();
 
+  // 1. Path-based overrides (highest priority)
   if (p.endsWith('.md') || p.includes('docs/') || p.includes('license')) return 'docs';
   if (p.includes('test') || p.includes('spec') || p.includes('__tests__')) return 'test';
   if (p.endsWith('package.json') || p.endsWith('package-lock.json') || p.endsWith('.gitignore') || p.includes('.vscode/')) return 'chore';
   if (p.endsWith('.css') || p.endsWith('.scss')) return 'style';
 
-  if (['fix', 'bug', 'error', 'issue', 'patch'].some(k => lowerDiff.includes(k))) return 'fix';
-  if (['refactor', 'rename', 'clean'].some(k => lowerDiff.includes(k))) return 'refactor';
+  // 2. Status-based overrides
+  // If the file is newly added (A) or untracked (?), default to 'feat' instead of scanning for fix/refactor keywords
+  if (status.includes('A') || status.includes('?')) return 'feat';
+
+  // 3. Diff-based heuristics (for modified files)
+  // Use regex word boundaries (\b) so "prefix" doesn't trigger "fix". Removed "error" as it flags standard try/catch blocks.
+  if (/\b(fix|bug|patch|issue)\b/.test(lowerDiff)) return 'fix';
+  if (/\b(refactor|rename|clean)\b/.test(lowerDiff)) return 'refactor';
 
   return 'feat';
 }
@@ -21,7 +28,8 @@ function getFileType(filePath, diffText = '') {
 export function groupFilesByType(files = [], diffText = '') {
   const groups = {};
   files.forEach(file => {
-    const type = getFileType(file.path, diffText);
+    // Pass the git status indicator into the detection logic
+    const type = getFileType(file.path, diffText, file.status);
     if (!groups[type]) groups[type] = [];
     groups[type].push(file);
   });
