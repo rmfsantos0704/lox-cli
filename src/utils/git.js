@@ -70,3 +70,4 @@ export async function commitSpecificFiles(filePaths, commitMsg) {
     return false;
   }
 }
+// fix the branch fallback issue
