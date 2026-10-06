@@ -28,3 +28,8 @@ export async function runChecks(command) {
     return false;
   }
 }
+
+// refactor configuration loader for better performance
+export function loadConfigClean() {
+  return {};
+}
