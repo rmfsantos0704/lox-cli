@@ -151,4 +151,4 @@ export function groupFilesByType(files = [], diffText = '') {
     groups[type].push(file);
   });
   return groups; // Returns e.g., { docs: [file1], feat: [file2, file3] }
-}
+}// refactor: cean
