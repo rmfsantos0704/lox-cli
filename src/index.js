@@ -19,4 +19,4 @@ export function run() {
     .action(commitCommand);
 
   program.parse(process.argv);
-}//fix: resolve undefined error
+}//fix: resolve undefined error/

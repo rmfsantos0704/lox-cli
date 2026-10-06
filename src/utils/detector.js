@@ -99,4 +99,4 @@ if (response.ok) {
   }
 
   return `update ${files.length} project files`;
-}
+}//refactor: clean up logic
