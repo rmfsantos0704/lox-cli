@@ -6,8 +6,28 @@ import { runChecks } from '../utils/checker.js';
 import { groupFilesByType, detectScope, generateDescription } from '../utils/detector.js';
 import { formatCommitMessage } from '../utils/formatter.js';
 
-export async function commitCommand() {
+export async function commitCommand(options = {}) {
   const status = await getGitStatus();
+  let filesToProcess = status.files;
+  if (options.interactive && filesToProcess.length > 0) {
+    const choices = filesToProcess.map(f => ({
+      name: `${f.status} ${f.path}`,
+      value: f,
+      checked: true 
+    }));
+
+    const { selectedFiles } = await inquirer.prompt([
+      {
+        type: 'checkbox',
+        name: 'selectedFiles',
+        message: 'Select the files you want to include in this commit run:',
+        choices,
+        validate: (ans) => ans.length > 0 ? true : 'You must select at least one file.'
+      }
+    ]);
+    
+    filesToProcess = selectedFiles;
+  }
 
   if (status.files.length === 0) {
     console.log(chalk.yellow('No changes detected to commit.'));
