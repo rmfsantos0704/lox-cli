@@ -9,20 +9,11 @@ const execAsync = util.promisify(exec);
 // Loads settings from .loxrc.json if it exists
 export function getConfig() {
   const configPath = path.join(process.cwd(), '.loxrc.json');
-  const defaultConfig = {
-    runPreCommitChecks: false,
-    checkCommand: 'npm run lint'
-  };
+  const defaultConfig = { runPreCommitChecks: false, checkCommand: 'node -v' };
 
-  if (fs.existsSync(configPath)) {
-    try {
-      const fileContent = fs.readFileSync(configPath, 'utf-8');
-      return { ...defaultConfig, ...JSON.parse(fileContent) };
-    } catch (error) {
-      console.log(chalk.red('⚠ Failed to parse .loxrc.json. Using defaults.'));
-    }
-  }
-  return defaultConfig;
+  return fs.existsSync(configPath)
+    ? { ...defaultConfig, ...JSON.parse(fs.readFileSync(configPath, 'utf-8')) }
+    : defaultConfig;
 }
 
 // Executes the command defined in the config

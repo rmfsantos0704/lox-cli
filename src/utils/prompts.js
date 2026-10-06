@@ -25,3 +25,4 @@ export const commitPrompts = [
     validate: (input) => input.length > 0 ? true : 'Description cannot be empty.'
   }
 ];
+

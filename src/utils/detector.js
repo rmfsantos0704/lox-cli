@@ -17,7 +17,7 @@ function getFileType(filePath, diffText = '') {
   return 'feat';
 }
 
-// Groups an array of git status files into buckets based on their detected type
+// Groups files into buckets based on detected type
 export function groupFilesByType(files = [], diffText = '') {
   const groups = {};
   files.forEach(file => {
@@ -28,15 +28,16 @@ export function groupFilesByType(files = [], diffText = '') {
   return groups;
 }
 
+// Detects scope based on file paths
 export function detectScope(files = []) {
-  if (files.length === 0) return '';
+  if (!files || files.length === 0) return '';
   const names = files.map(f => path.parse(f.path).name);
   if (names.length === 1) return names[0];
   if (names.length <= 3) return names.join(', ');
   return `${names.slice(0, 2).join(', ')} +${names.length - 2} more`;
 }
 
-// AI-powered feature description with Ollama and fallback
+// AI-powered description generator with Ollama and fallback
 export async function generateDescription(files = [], diffText = '') {
   if (files.length === 0) return 'update project files';
 
@@ -54,22 +55,17 @@ export async function generateDescription(files = [], diffText = '') {
         signal: AbortSignal.timeout(15000)
       });
 
-if (response.ok) {
+      if (response.ok) {
         const data = await response.json();
         const aiDescription = data.response?.trim().toLowerCase();
-        
+
         if (aiDescription) {
-           const cleaned = aiDescription.replace(/^adds\b/, 'add').replace(/^fixes\b/, 'fix');
-           
-           // Print debug log
-           console.log(chalk.magenta(`🧠 [Ollama AI Active]: "${cleaned}"`));
-           
-           return cleaned;
+          const cleaned = aiDescription.replace(/^adds\b/, 'add').replace(/^fixes\b/, 'fix');
+          console.log(chalk.magenta(`🧠 [Ollama AI Active]: "${cleaned}"`));
+          return cleaned;
         }
       }
-      
     } catch (err) {
-      // Fallback silently if Ollama times out
       console.log(chalk.red(`❌ [Ollama Error]: ${err.message}`));
     }
   }
@@ -99,4 +95,4 @@ if (response.ok) {
   }
 
   return `update ${files.length} project files`;
-}//refactor: clean up logic
+}
