@@ -1,9 +1,10 @@
-import inquirer from 'inquirer';
 import chalk from 'chalk';
-import { formatCommitMessage } from '../utils/formatter.js';
-import { commitSpecificFiles, getGitStatus, getGitDiff, getCurrentBranch } from '../utils/git.js';
+import inquirer from 'inquirer';
+import { getGitStatus, getGitDiff, getCurrentBranch, commitSpecificFiles } from '../utils/git.js';
+import { getConfig } from '../utils/config.js';
+import { runChecks } from '../utils/checker.js';
 import { groupFilesByType, detectScope, generateDescription } from '../utils/detector.js';
-import { getConfig, runChecks } from '../utils/config.js';
+import { formatCommitMessage } from '../utils/formatter.js';
 
 export async function commitCommand() {
   const status = await getGitStatus();
@@ -29,8 +30,8 @@ export async function commitCommand() {
   const branchType = branchMatch ? branchMatch[1] : null;
   const branchScope = branchMatch ? branchMatch[2] : null;
 
-  const diff = await getGitDiff();
-  const groupedFiles = groupFilesByType(status.files, diff);
+  const globalDiff = await getGitDiff();
+  const groupedFiles = groupFilesByType(status.files, globalDiff);
   const groupCount = Object.keys(groupedFiles).length;
 
   console.log(chalk.cyan(`\n🤖 Auto-detected ${groupCount} different type(s) of changes. Preparing separate commits...\n`));
@@ -39,10 +40,18 @@ export async function commitCommand() {
     console.log(chalk.bgMagenta.bold(`\n --- Committing [${detectedType}] Changes --- `));
     files.forEach(f => console.log(chalk.gray(`  • ${f.path}`)));
 
+    // Extract file paths for this specific group
+    const groupFilePaths = files.map(f => f.path);
+
+    // Fetch an ISOLATED diff strictly for the files in this group
+    const groupDiff = await getGitDiff(groupFilePaths);
+
     // Use branch-detected scope/type if available, otherwise fall back to file analysis
     const defaultType = branchType && branchType === detectedType ? branchType : detectedType;
     const defaultScope = branchScope || detectScope(files);
-    const defaultDescription = generateDescription(files, diff);
+
+    // FIX: Await the async generateDescription call with the group-specific diff
+    const defaultDescription = await generateDescription(files, groupDiff);
 
     const commitPrompts = [
       {
@@ -91,8 +100,7 @@ export async function commitCommand() {
     const answers = await inquirer.prompt(commitPrompts);
     const commitMsg = formatCommitMessage(answers);
     
-    const filePaths = files.map(f => f.path);
-    const success = await commitSpecificFiles(filePaths, commitMsg);
+    const success = await commitSpecificFiles(groupFilePaths, commitMsg);
     
     if (success) {
       console.log(chalk.green(`✔ Committed: "${commitMsg.split('\n')[0]}"`));

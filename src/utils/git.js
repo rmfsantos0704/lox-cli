@@ -1,41 +1,72 @@
-import { simpleGit } from 'simple-git';
+import { exec } from 'child_process';
+import util from 'util';
 
-const git = simpleGit();
+const execAsync = util.promisify(exec);
 
+// Gets the list of modified, added, or deleted files
 export async function getGitStatus() {
   try {
-    return await git.status();
+    const { stdout } = await execAsync('git status --porcelain');
+    if (!stdout.trim()) return { files: [] };
+
+    const files = stdout.split('\n').filter(Boolean).map(line => {
+      // Parses porcelain output (e.g., " M src/index.js")
+      const match = line.match(/^\s*([A-Z?]{1,2})\s+(.+)$/);
+      if (match) {
+        return { status: match[1], path: match[2] };
+      }
+      return null;
+    }).filter(Boolean);
+
+    return { files };
   } catch (error) {
-    console.error('Error fetching git status:', error.message);
-    process.exit(1);
+    return { files: [] };
   }
 }
 
-export async function getGitDiff() {
+// Gets the code differences for specific files (or global if empty)
+export async function getGitDiff(filePaths = []) {
   try {
-    return await git.diff();
-  } catch (error) {
-    return '';
+    const target = filePaths.length > 0 ? `-- ${filePaths.map(p => `"${p}"`).join(' ')}` : '';
+    const { stdout } = await execAsync(`git diff HEAD ${target}`);
+    return stdout || '';
+  } catch (err) {
+    // Fallback if HEAD doesn't exist yet (initial commit)
+    try {
+      const target = filePaths.length > 0 ? `-- ${filePaths.map(p => `"${p}"`).join(' ')}` : '';
+      const { stdout } = await execAsync(`git diff ${target}`);
+      return stdout || '';
+    } catch {
+      return '';
+    }
   }
 }
 
-// NEW: Accepts an array of specific file paths to stage and commit independently
-export async function commitSpecificFiles(filePaths, message) {
-  try {
-    await git.add(filePaths);
-    await git.commit(message);
-    return true;
-  } catch (error) {
-    console.error('Git commit failed:', error.message);
-    return false;
-  }
-}
-
+// Gets the current active Git branch
 export async function getCurrentBranch() {
   try {
-    const branch = await git.revparse(['--abbrev-ref', 'HEAD']);
-    return branch.trim();
-  } catch (error) {
-    return '';
+    const { stdout } = await execAsync('git branch --show-current');
+    return stdout.trim();
+  } catch {
+    return 'main'; // Fallback branch name
+  }
+}
+
+// Stages and commits only the specific files provided
+export async function commitSpecificFiles(filePaths, commitMsg) {
+  try {
+    // 1. Unstage everything to ensure a clean slate
+    await execAsync('git reset');
+    
+    // 2. Stage only the specific files in this group
+    const paths = filePaths.map(p => `"${p}"`).join(' ');
+    await execAsync(`git add ${paths}`);
+    
+    // 3. Commit with the generated message
+    const escapedMsg = commitMsg.replace(/"/g, '\\"');
+    await execAsync(`git commit -m "${escapedMsg}"`);
+    return true;
+  } catch (err) {
+    return false;
   }
 }
