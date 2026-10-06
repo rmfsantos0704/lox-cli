@@ -115,4 +115,4 @@ export async function releaseCommand() {
 }
 
 console.log(chalk.cyan('Pushing release and tags to GitHub...'));
-console.log(chalk.cyan('Execute Command: "git push --follow-tag" after reviewing'));
+console.log(chalk.cyan('Execute Command: "git push --tags" after reviewing'));
