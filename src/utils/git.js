@@ -1,5 +1,6 @@
 import { exec } from 'child_process';
 import util from 'util';
+import fs from 'fs/promises';
 
 const execAsync = util.promisify(exec);
 
@@ -23,22 +24,31 @@ export async function getGitStatus() {
     return { files: [] };
   }
 }
-
-// Gets the code differences for specific files (or global if empty)
 export async function getGitDiff(filePaths = []) {
   try {
     const target = filePaths.length > 0 ? `-- ${filePaths.map(p => `"${p}"`).join(' ')}` : '';
+    // This captures actual git changes, including deletions (shown as minus lines)
     const { stdout } = await execAsync(`git diff HEAD ${target}`);
-    return stdout || '';
-  } catch (err) {
-    // Fallback if HEAD doesn't exist yet (initial commit)
-    try {
-      const target = filePaths.length > 0 ? `-- ${filePaths.map(p => `"${p}"`).join(' ')}` : '';
-      const { stdout } = await execAsync(`git diff ${target}`);
-      return stdout || '';
-    } catch {
-      return '';
+    if (stdout.trim()) return stdout;
+
+    // Fallback for untracked or newly added files
+    if (filePaths.length > 0) {
+      let combinedContent = '';
+      for (const file of filePaths) {
+        try {
+          const content = await fs.readFile(file, 'utf8');
+          combinedContent += `\n--- NEW FILE: ${file} ---\n${content}`;
+        } catch (err) {
+          // File likely deleted or doesn't exist on disk, mark it clearly for Ollama
+          combinedContent += `\n--- DELETED FILE: ${file} ---\n`;
+        }
+      }
+      return combinedContent;
     }
+    
+    return '';
+  } catch (err) {
+    return '';
   }
 }
 
@@ -70,4 +80,3 @@ export async function commitSpecificFiles(filePaths, commitMsg) {
     return false;
   }
 }
-// fix the branch fallback issue
