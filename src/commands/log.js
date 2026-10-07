@@ -54,5 +54,3 @@ export async function logCommand() {
     console.log(chalk.red('❌ Failed to retrieve git log.'));
   }
 }
-
-// refactor and clean up ISO timestamp formatting
