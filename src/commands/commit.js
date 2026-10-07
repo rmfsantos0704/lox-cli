@@ -9,6 +9,13 @@ import { formatCommitMessage } from '../utils/formatter.js';
 export async function commitCommand(options = {}) {
   const status = await getGitStatus();
   let filesToProcess = status.files;
+
+  if (status.files.length === 0) {
+    console.log(chalk.yellow('No changes detected to commit.'));
+    return;
+  }
+
+  // Interactive file selection
   if (options.interactive && filesToProcess.length > 0) {
     const choices = filesToProcess.map(f => ({
       name: `${f.status} ${f.path}`,
@@ -29,8 +36,8 @@ export async function commitCommand(options = {}) {
     filesToProcess = selectedFiles;
   }
 
-  if (status.files.length === 0) {
-    console.log(chalk.yellow('No changes detected to commit.'));
+  if (filesToProcess.length === 0) {
+    console.log(chalk.yellow('No files selected for commit.'));
     return;
   }
 
@@ -50,8 +57,8 @@ export async function commitCommand(options = {}) {
   const branchType = branchMatch ? branchMatch[1] : null;
   const branchScope = branchMatch ? branchMatch[2] : null;
 
-  const globalDiff = await getGitDiff();
-  const groupedFiles = groupFilesByType(status.files, globalDiff);
+const globalDiff = await getGitDiff();
+  const groupedFiles = groupFilesByType(filesToProcess, globalDiff); // ✅ FIXED
   const groupCount = Object.keys(groupedFiles).length;
 
   console.log(chalk.cyan(`\n🤖 Auto-detected ${groupCount} different type(s) of changes. Preparing separate commits...\n`));
@@ -70,7 +77,7 @@ export async function commitCommand(options = {}) {
     const defaultType = branchType && branchType === detectedType ? branchType : detectedType;
     const defaultScope = branchScope || detectScope(files);
 
-    // FIX: Await the async generateDescription call with the group-specific diff
+    // Generate AI description using the isolated group diff
     const defaultDescription = await generateDescription(files, groupDiff);
 
     const commitPrompts = [
