@@ -1,3 +1,4 @@
+import fs from 'fs';
 import path from 'path';
 import chalk from 'chalk';
 
@@ -12,9 +13,20 @@ function getFileType(filePath, diffText = '', status = '') {
   if (p.endsWith('.css') || p.endsWith('.scss')) return 'style';
 
   // 2. Status-based overrides
-  // Deleted files are cleanups/refactors, not bug fixes
   if (status.includes('D')) return 'refactor';
-  
+
+  // NEW: Comment-Only Detection
+  // Extract actual changed lines, ignoring Git file headers (+++/---)
+  const changedLines = diffText.split('\n').filter(line => 
+    (line.startsWith('+') || line.startsWith('-')) && 
+    !line.startsWith('+++') && !line.startsWith('---')
+  );
+
+  // If there are changes, and EVERY changed line is a comment, force 'chore'
+  if (changedLines.length > 0 && changedLines.every(line => /^[+-]\s*(\/\/|\/\*|\*)/.test(line))) {
+    return 'chore';
+  }
+
   // Newly added files are features
   if (status.includes('A') || status.includes('?')) return 'feat';
 
@@ -59,16 +71,54 @@ export async function generateDescription(files = [], diffText = '') {
 
   // 2. Attempt Local AI Detection via Ollama
   if (diffText.trim().length > 0) {
+    // Read user's config to check for upgraded model, fallback to llama3.2
+    let selectedModel = 'llama3.2';
+    try {
+      const rcPath = path.join(process.cwd(), '.loxrc.json');
+      if (fs.existsSync(rcPath)) {
+        const rc = JSON.parse(fs.readFileSync(rcPath, 'utf8'));
+        if (rc.model) selectedModel = rc.model;
+      }
+    } catch (e) {
+      // Silently ignore config read errors and use default
+    }
+
+    // NEW: Visual indicator that AI processing has started
+    console.log(chalk.gray(`\n⏳ [AI Active (${selectedModel})]: Analyzing code changes...`));
+
     try {
       const response = await fetch('http://127.0.0.1:11434/api/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          model: 'llama3.2',
-          prompt: `Analyze this git diff and summarize the code change in 3 to 8 words using imperative mood (e.g. "update description generator logic" or "add user login"). Do not include quotes, markdown, or punctuation:\n\n${diffText.slice(0, 4000)}`,
+          model: selectedModel,
+          prompt: `You are an expert developer writing commit descriptions. Summarize ONLY the code changes marked with '+' (additions) or '-' (deletions). Ignore all unmarked context lines.
+Use imperative mood (e.g., "add", "fix", "update"), keep it under 8 words, and output ONLY the raw text.
+
+Example 1:
+Diff:
+  function load() {
+-   console.log("loading");
++   logger.info("loading module");
+    return true;
+  }
+Output: update logger implementation in load function
+
+Example 2:
+Diff:
+  const config = {
++   // update timeout to 5000ms
+    timeout: 5000
+  }
+Output: update inline comments
+
+Now process this diff:
+Diff:
+${diffText.slice(0, 4000)}
+Output:`,
           stream: false
         }),
-        signal: AbortSignal.timeout(15000)
+        signal: AbortSignal.timeout(30000) // Increased to 30 seconds for 7B models
       });
 
       if (response.ok) {
@@ -82,12 +132,13 @@ export async function generateDescription(files = [], diffText = '') {
              .replace(/^removes\b/, 'remove')
              .replace(/^updates\b/, 'update');
              
-           console.log(chalk.magenta(`🧠 [Ollama AI Active]: "${cleaned}"`));
+           console.log(chalk.magenta(`🧠 [Ollama AI Active (${selectedModel})]: "${cleaned}"`));
            return cleaned;
         }
       }
     } catch (err) {
-      // Fallback silently
+      // NEW: Catch block now alerts if it times out or Ollama is not running
+      console.log(chalk.yellow(`⚠️ AI detection skipped (${err.name === 'AbortError' ? 'Timed out' : 'Ollama offline'})`));
     }
   }
 

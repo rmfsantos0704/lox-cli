@@ -1,4 +1,5 @@
 {
-  "runPreCommitChecks": true,
-  "checkCommand": "node -v"
+  "model": "qwen2.5:7b",
+  "runPreCommitChecks": false,
+  "checkCommand": "npm run test"
 }

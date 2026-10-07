@@ -54,3 +54,5 @@ export async function logCommand() {
     console.log(chalk.red('❌ Failed to retrieve git log.'));
   }
 }
+
+// Convert the ISO date string into a readable local date and time
