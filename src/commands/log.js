@@ -55,4 +55,3 @@ export async function logCommand() {
   }
 }
 
-// Convert the ISO date string into a readable local date and time

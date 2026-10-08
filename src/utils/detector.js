@@ -126,6 +126,7 @@ Output:`,
         const aiDescription = data.response?.trim().toLowerCase();
         
         if (aiDescription) {
+          const firstLine = aiDescription.split('\n')[0].trim();
            const cleaned = aiDescription
              .replace(/^adds\b/, 'add')
              .replace(/^fixes\b/, 'fix')
