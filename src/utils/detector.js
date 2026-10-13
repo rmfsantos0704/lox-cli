@@ -82,7 +82,7 @@ export async function generateDescription(files = [], diffText = '') {
     return fallbackMsg;
   }
 
-  // Safe extension-based binary check (prevents false positives on text/markdown files)
+  // Safe extension-based binary check
   const binaryExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.ico', '.pdf', '.zip', '.exe', '.bin', '.tar', '.gz', '.mp4', '.mp3'];
   const isBinaryFile = files.length === 1 && binaryExtensions.some(ext => files[0].path.toLowerCase().endsWith(ext));
   if (isBinaryFile) {
@@ -143,6 +143,15 @@ Output:`,
         
         if (aiDescription) {
            const firstLine = aiDescription.split('\n')[0].trim();
+           
+           // GUARD: Catch stubborn LLM hallucinations
+           if (firstLine.includes('binary file') || firstLine.includes('ignore')) {
+             const filename = path.basename(files[0].path);
+             const fallback = `update ${filename}`;
+             console.log(chalk.yellow(`⚠️ [AI Guard]: Intercepted model hallucination, using fallback: "${fallback}"`));
+             return fallback;
+           }
+
            const cleaned = firstLine
              .replace(/^adds\b/, 'add')
              .replace(/^fixes\b/, 'fix')
