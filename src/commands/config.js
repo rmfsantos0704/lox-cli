@@ -17,7 +17,7 @@ export async function configCommand() {
 
   const answers = await inquirer.prompt([
     {
-      type: 'list',
+      type: 'select',
       name: 'model',
       message: 'Which local Ollama model should LOX use?',
       choices: ['llama3.2', 'mistral', 'phi3', 'codellama'],
