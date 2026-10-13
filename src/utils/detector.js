@@ -15,15 +15,14 @@ function getFileType(filePath, diffText = '', status = '') {
   // 2. Status-based overrides
   if (status.includes('D')) return 'refactor';
 
-  // NEW: Comment-Only Detection
-  // Extract actual changed lines, ignoring Git file headers (+++/---)
-  const changedLines = diffText.split('\n').filter(line => 
+  // Comment-Only Detection (Deterministic Interceptor)
+  const cleanDiff = diffText.replace(/\r/g, '');
+  const changedLines = cleanDiff.split('\n').filter(line => 
     (line.startsWith('+') || line.startsWith('-')) && 
     !line.startsWith('+++') && !line.startsWith('---')
   );
 
-  // If there are changes, and EVERY changed line is a comment, force 'chore'
-  if (changedLines.length > 0 && changedLines.every(line => /^[+-]\s*(\/\/|\/\*|\*)/.test(line))) {
+  if (changedLines.length > 0 && changedLines.every(line => /^[+-]\s*(\/\/|\/\*|\*|<!--)/.test(line))) {
     return 'chore';
   }
 
@@ -31,7 +30,7 @@ function getFileType(filePath, diffText = '', status = '') {
   if (status.includes('A') || status.includes('?')) return 'feat';
 
   // 3. Diff-based heuristics for modified (M) files
-  const lowerDiff = diffText.toLowerCase();
+  const lowerDiff = cleanDiff.toLowerCase();
   if (/\b(fix|bug|patch|issue)\b/.test(lowerDiff)) return 'fix';
   if (/\b(refactor|rename|clean)\b/.test(lowerDiff)) return 'refactor';
 
@@ -69,9 +68,29 @@ export async function generateDescription(files = [], diffText = '') {
     return `remove obsolete files`;
   }
 
-  // 2. Attempt Local AI Detection via Ollama
-  if (diffText.trim().length > 0) {
-    // Read user's config to check for upgraded model, fallback to llama3.2
+  // 2. Deterministic Comment & Binary Interceptor
+  const cleanDiff = diffText.replace(/\r/g, '');
+  const changedLines = cleanDiff.split('\n').filter(line => 
+    (line.startsWith('+') || line.startsWith('-')) && 
+    !line.startsWith('+++') && !line.startsWith('---')
+  );
+
+  // If every changed line is a comment, bypass AI
+  if (changedLines.length > 0 && changedLines.every(line => /^[+-]\s*(\/\/|\/\*|\*|<!--)/.test(line))) {
+    const fallbackMsg = 'update inline comments';
+    console.log(chalk.magenta(`🧠 [Deterministic Interceptor]: "${fallbackMsg}"`));
+    return fallbackMsg;
+  }
+
+  // Safe extension-based binary check (prevents false positives on text/markdown files)
+  const binaryExtensions = ['.png', '.jpg', '.jpeg', '.gif', '.ico', '.pdf', '.zip', '.exe', '.bin', '.tar', '.gz', '.mp4', '.mp3'];
+  const isBinaryFile = files.length === 1 && binaryExtensions.some(ext => files[0].path.toLowerCase().endsWith(ext));
+  if (isBinaryFile) {
+    return `update binary assets`;
+  }
+
+  // 3. Attempt Local AI Detection via Ollama
+  if (cleanDiff.trim().length > 0) {
     let selectedModel = 'llama3.2';
     try {
       const rcPath = path.join(process.cwd(), '.loxrc.json');
@@ -80,10 +99,9 @@ export async function generateDescription(files = [], diffText = '') {
         if (rc.model) selectedModel = rc.model;
       }
     } catch (e) {
-      // Silently ignore config read errors and use default
+      // Fallback to default
     }
 
-    // NEW: Visual indicator that AI processing has started
     console.log(chalk.gray(`\n⏳ [AI Active (${selectedModel})]: Analyzing code changes...`));
 
     try {
@@ -95,7 +113,7 @@ export async function generateDescription(files = [], diffText = '') {
           prompt: `You are an expert developer writing commit descriptions. Summarize ONLY the code changes marked with '+' (additions) or '-' (deletions). Ignore all unmarked context lines.
 Use imperative mood (e.g., "add", "fix", "update"), keep it under 8 words, and output ONLY the raw text.
 
-Example 1:
+Example 1 (Logic Change):
 Diff:
   function load() {
 -   console.log("loading");
@@ -104,21 +122,19 @@ Diff:
   }
 Output: update logger implementation in load function
 
-Example 2:
+Example 2 (Documentation Change):
 Diff:
-  const config = {
-+   // update timeout to 5000ms
-    timeout: 5000
-  }
-Output: update inline comments
+  # LOX CLI
++ welcome for feedbacks.
+Output: add feedback invitation to readme
 
 Now process this diff:
 Diff:
-${diffText.slice(0, 4000)}
+${cleanDiff.slice(0, 4000)}
 Output:`,
           stream: false
         }),
-        signal: AbortSignal.timeout(30000) // Increased to 30 seconds for 7B models
+        signal: AbortSignal.timeout(30000)
       });
 
       if (response.ok) {
@@ -126,8 +142,8 @@ Output:`,
         const aiDescription = data.response?.trim().toLowerCase();
         
         if (aiDescription) {
-          const firstLine = aiDescription.split('\n')[0].trim();
-           const cleaned = aiDescription
+           const firstLine = aiDescription.split('\n')[0].trim();
+           const cleaned = firstLine
              .replace(/^adds\b/, 'add')
              .replace(/^fixes\b/, 'fix')
              .replace(/^removes\b/, 'remove')
@@ -138,12 +154,11 @@ Output:`,
         }
       }
     } catch (err) {
-      // NEW: Catch block now alerts if it times out or Ollama is not running
       console.log(chalk.yellow(`⚠️ AI detection skipped (${err.name === 'AbortError' ? 'Timed out' : 'Ollama offline'})`));
     }
   }
 
-  // 3. Basic File Action Fallback
+  // 4. Basic File Action Fallback
   if (files.length === 1) {
     const filename = path.basename(files[0].path);
     return `update ${filename}`;
