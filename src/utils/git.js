@@ -80,3 +80,13 @@ export async function commitSpecificFiles(filePaths, commitMsg) {
     return false;
   }
 }
+
+export async function getGitDiffStat(filePaths = []) {
+  try {
+    const fileArgs = filePaths.length > 0 ? `-- ${filePaths.map(f => `"${f}"`).join(' ')}` : '';
+    const { stdout } = await execAsync(`git diff --stat ${fileArgs}`);
+    return stdout.trim();
+  } catch (error) {
+    return '';
+  }
+}
