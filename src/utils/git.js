@@ -1,92 +1,208 @@
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import util from 'util';
 import fs from 'fs/promises';
+import path from 'path';
 
-const execAsync = util.promisify(exec);
+const run = util.promisify(execFile);
 
-// Gets the list of modified, added, or deleted files
-export async function getGitStatus() {
-  try {
-    const { stdout } = await execAsync('git status --porcelain');
-    if (!stdout.trim()) return { files: [] };
+// Hash of git's empty tree: lets us diff in a repo that has no commits yet.
+const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+const MAX_BUFFER = 64 * 1024 * 1024;
+const SNIFF_BYTES = 64 * 1024;
+const MAX_UNTRACKED_LINES = 400;
 
-    const files = stdout.split('\n').filter(Boolean).map(line => {
-      // Parses porcelain output (e.g., " M src/index.js")
-      const match = line.match(/^\s*([A-Z?]{1,2})\s+(.+)$/);
-      if (match) {
-        return { status: match[1], path: match[2] };
-      }
-      return null;
-    }).filter(Boolean);
+const debug = (err) => {
+  if (process.env.LOX_DEBUG) console.error('[lox:git]', err?.stderr || err?.message || err);
+};
 
-    return { files };
-  } catch (error) {
-    return { files: [] };
+const rootCache = new Map();
+
+// Porcelain paths are relative to the repo root, so every command runs from there.
+async function getRepoRoot() {
+  const cwd = process.cwd();
+  if (!rootCache.has(cwd)) {
+    const { stdout } = await run('git', ['rev-parse', '--show-toplevel'], { cwd });
+    rootCache.set(cwd, stdout.trim());
   }
+  return rootCache.get(cwd);
 }
-export async function getGitDiff(filePaths = []) {
-  try {
-    const target = filePaths.length > 0 ? `-- ${filePaths.map(p => `"${p}"`).join(' ')}` : '';
-    // This captures actual git changes, including deletions (shown as minus lines)
-    const { stdout } = await execAsync(`git diff HEAD ${target}`);
-    if (stdout.trim()) return stdout;
 
-    // Fallback for untracked or newly added files
-    if (filePaths.length > 0) {
-      let combinedContent = '';
-      for (const file of filePaths) {
-        try {
-          const content = await fs.readFile(file, 'utf8');
-          combinedContent += `\n--- NEW FILE: ${file} ---\n${content}`;
-        } catch (err) {
-          // File likely deleted or doesn't exist on disk, mark it clearly for Ollama
-          combinedContent += `\n--- DELETED FILE: ${file} ---\n`;
-        }
-      }
-      return combinedContent;
+// execFile with an args array: no shell, so quotes, $, backticks and spaces in
+// paths or commit messages can never be interpreted by a shell (also works on Windows).
+async function git(args, opts = {}) {
+  const cwd = await getRepoRoot();
+  // --literal-pathspecs: a file called "a[1].js" or "*.js" is a file, not a glob.
+  return run('git', ['--literal-pathspecs', '-c', 'core.quotepath=false', ...args], { cwd, maxBuffer: MAX_BUFFER, ...opts });
+}
+
+// Accepts file objects ({ path, origPath }) or plain path strings.
+function toPaths(files = []) {
+  const out = [];
+  for (const f of files) {
+    if (typeof f === 'string') out.push(f);
+    else {
+      out.push(f.path);
+      if (f.origPath) out.push(f.origPath); // renames: the old path must be staged too
     }
-    
-    return '';
-  } catch (err) {
-    return '';
+  }
+  return [...new Set(out)];
+}
+
+async function diffBase() {
+  try {
+    await git(['rev-parse', '--verify', '--quiet', 'HEAD']);
+    return 'HEAD';
+  } catch {
+    return EMPTY_TREE; // repository has no commits yet
   }
 }
 
-// Gets the current active Git branch
+const isConflict = (xy) => xy.includes('U') || xy === 'AA' || xy === 'DD';
+
+// Returns { files, conflicts, error }. `error` is set when git itself failed
+// (not a repository, git missing...) so callers can tell that apart from "no changes".
+export async function getGitStatus() {
+  let stdout;
+  try {
+    ({ stdout } = await git(['status', '--porcelain=v1', '-z', '-uall']));
+  } catch (err) {
+    const msg = String(err.stderr || err.message || '').trim();
+    let error = msg;
+    if (err.code === 'ENOENT') error = 'git was not found on your PATH.';
+    else if (/not a git repository/i.test(msg)) error = 'This folder is not a git repository.';
+    return { files: [], conflicts: [], error };
+  }
+
+  const parts = stdout.split('\0');
+  const files = [];
+  const conflicts = [];
+
+  for (let i = 0; i < parts.length; i++) {
+    const entry = parts[i];
+    if (entry.length < 4) continue; // trailing empty chunk
+    const xy = entry.slice(0, 2);
+    const file = { status: xy.trim(), path: entry.slice(3) };
+    // In -z mode a rename/copy is "XY new\0old\0"
+    if (/[RC]/.test(xy)) file.origPath = parts[++i];
+    (isConflict(xy) ? conflicts : files).push(file);
+  }
+
+  return { files, conflicts };
+}
+
+// Builds a unified diff for files git does not track yet, so they look like
+// ordinary additions ('+' lines) to the classifier and the AI prompt.
+async function syntheticAddition(rel) {
+  const root = await getRepoRoot();
+  const abs = path.join(root, rel);
+  let stat;
+  try {
+    stat = await fs.stat(abs);
+  } catch {
+    return '';
+  }
+  if (!stat.isFile()) return '';
+
+  const header = `diff --git a/${rel} b/${rel}\nnew file mode 100644\n`;
+  if (stat.size === 0) return header;
+
+  const fh = await fs.open(abs, 'r');
+  let buf;
+  try {
+    buf = Buffer.alloc(Math.min(stat.size, SNIFF_BYTES));
+    await fh.read(buf, 0, buf.length, 0);
+  } finally {
+    await fh.close();
+  }
+  if (buf.includes(0)) return `${header}Binary files /dev/null and b/${rel} differ\n`;
+
+  let lines = buf.toString('utf8').split(/\r?\n/);
+  if (lines[lines.length - 1] === '') lines.pop();
+  lines = lines.slice(0, MAX_UNTRACKED_LINES);
+  return `${header}--- /dev/null\n+++ b/${rel}\n@@ -0,0 +1,${lines.length} @@\n${lines.map(l => `+${l}`).join('\n')}\n`;
+}
+
+async function listUntracked(paths) {
+  const args = ['ls-files', '--others', '--exclude-standard', '-z'];
+  if (paths.length) args.push('--', ...paths);
+  try {
+    const { stdout } = await git(args);
+    return stdout.split('\0').filter(Boolean);
+  } catch (err) {
+    debug(err);
+    return [];
+  }
+}
+
+// Diff of the given files against HEAD (-U0: only changed lines, no context),
+// with untracked files appended as synthetic additions.
+export async function getGitDiff(files = []) {
+  const paths = toPaths(files);
+  const base = await diffBase();
+  const args = ['diff', base, '-U0', '--no-color', '--no-ext-diff'];
+  if (paths.length) args.push('--', ...paths);
+
+  let out = '';
+  try {
+    out = (await git(args)).stdout;
+  } catch (err) {
+    debug(err);
+  }
+
+  for (const rel of await listUntracked(paths)) {
+    out += await syntheticAddition(rel);
+  }
+  return out;
+}
+
+export async function getGitDiffStat(files = []) {
+  const paths = toPaths(files);
+  const base = await diffBase();
+  const args = ['diff', base, '--stat', '--no-color', '--no-ext-diff'];
+  if (paths.length) args.push('--', ...paths);
+
+  let out = '';
+  try {
+    out = (await git(args)).stdout.trim();
+  } catch (err) {
+    debug(err);
+  }
+
+  const untracked = await listUntracked(paths);
+  if (untracked.length) {
+    out += `${out ? '\n' : ''}${untracked.map(p => ` ${p} (new file)`).join('\n')}`;
+  }
+  return out;
+}
+
 export async function getCurrentBranch() {
   try {
-    const { stdout } = await execAsync('git branch --show-current');
+    const { stdout } = await git(['branch', '--show-current']);
     return stdout.trim();
   } catch {
-    return 'main'; // Fallback branch name
-  }
-}
-
-// Stages and commits only the specific files provided
-export async function commitSpecificFiles(filePaths, commitMsg) {
-  try {
-    // 1. Unstage everything to ensure a clean slate
-    await execAsync('git reset');
-    
-    // 2. Stage only the specific files in this group
-    const paths = filePaths.map(p => `"${p}"`).join(' ');
-    await execAsync(`git add ${paths}`);
-    
-    // 3. Commit with the generated message
-    const escapedMsg = commitMsg.replace(/"/g, '\\"');
-    await execAsync(`git commit -m "${escapedMsg}"`);
-    return true;
-  } catch (err) {
-    return false;
-  }
-}
-
-export async function getGitDiffStat(filePaths = []) {
-  try {
-    const fileArgs = filePaths.length > 0 ? `-- ${filePaths.map(f => `"${f}"`).join(' ')}` : '';
-    const { stdout } = await execAsync(`git diff --stat ${fileArgs}`);
-    return stdout.trim();
-  } catch (error) {
     return '';
+  }
+}
+
+// Stages and commits ONLY the given files. Anything else the user has staged is
+// left alone (no `git reset`): `git commit -- <paths>` records just those paths.
+// Returns { ok: true } or { ok: false, error } with git's real message
+// (hook failure, missing user.name, nothing to commit...).
+export async function commitSpecificFiles(files, commitMsg) {
+  const paths = toPaths(files);
+  if (paths.length === 0) return { ok: false, error: 'No files to commit.' };
+  try {
+    // Only `add` paths that still exist in the index or on disk. The old side of a
+    // staged rename / a staged deletion is already recorded in the index, and
+    // `git add` errors on it ("pathspec did not match"). `commit -- <paths>` still
+    // receives every path, so those deletions are committed too.
+    const { stdout } = await git(['ls-files', '-z', '--cached', '--others', '--exclude-standard', '--', ...paths]);
+    const addable = [...new Set(stdout.split('\0').filter(Boolean))];
+    if (addable.length) await git(['add', '-A', '--', ...addable]);
+    await git(['commit', '-m', commitMsg, '--', ...paths]);
+    return { ok: true };
+  } catch (err) {
+    const text = [err.stdout, err.stderr].filter(Boolean).join('\n').trim();
+    return { ok: false, error: text || err.message };
   }
 }
