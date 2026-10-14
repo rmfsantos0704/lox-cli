@@ -1,6 +1,7 @@
 import chalk from 'chalk';
 import inquirer from 'inquirer';
-import { getGitStatus, getGitDiff, getGitDiffStat, getCurrentBranch, commitSpecificFiles } from '../utils/git.js';
+import { getGitStatus, getGitDiff, getGitDiffStat, getCurrentBranch, commitSpecificFiles, readRepoFile } from '../utils/git.js';
+import { findGroupDependencies, mergeGroups, orderGroups } from '../utils/deps.js';
 import { getConfig } from '../utils/config.js';
 import { runChecks } from '../utils/checker.js';
 import { groupFilesByType, detectScope, generateDescription, validateCommitHeader } from '../utils/detector.js';
@@ -24,6 +25,48 @@ const TYPE_CHOICES = [
 ];
 
 const label = (f) => `${f.status} ${f.origPath ? `${f.origPath} -> ` : ''}${f.path}`;
+
+// A branch type can refine a plain code group: on a fix/ branch, "feat" code changes
+// default to "fix". Docs, tests, chores etc. keep their own detected type.
+const BRANCH_OVERRIDES = new Set(['fix', 'refactor', 'perf']);
+
+// If one group imports a file that changes in another group, committing them
+// separately (or in the wrong order) leaves a commit that can't run on its own.
+async function resolveDependencies(groups) {
+  if (Object.keys(groups).length < 2) return groups;
+
+  const edges = await findGroupDependencies(groups, readRepoFile);
+  if (edges.length === 0) return groups;
+
+  console.log(chalk.yellow('⚠️ Some groups depend on files that are in a different group:'));
+  const seen = new Set();
+  for (const e of edges) {
+    const id = `${e.from}>${e.to}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    console.log(chalk.yellow(`   • [${e.from}] ${e.file} imports ${e.imports} [${e.to}]`));
+  }
+
+  const { choice } = await inquirer.prompt([
+    {
+      type: 'select',
+      name: 'choice',
+      message: 'How should these be committed?',
+      choices: [
+        { name: 'Merge them into one commit (every commit works on its own)', value: 'merge' },
+        { name: 'Keep separate commits, dependencies first', value: 'ordered' }
+      ]
+    }
+  ]);
+
+  if (choice === 'merge') return mergeGroups(groups, edges);
+
+  const { groups: ordered, cyclic } = orderGroups(groups, edges);
+  if (cyclic.length > 0) {
+    console.log(chalk.yellow(`   Import cycle between: ${cyclic.join(', ')}. These cannot be ordered safely; consider merging them.`));
+  }
+  return ordered;
+}
 
 function loadConfig() {
   try {
@@ -92,7 +135,8 @@ export async function commitCommand(options = {}) {
   const branchScope = branchMatch ? sanitizeScope(branchMatch[2]) : '';
 
   // Each file is classified from ITS OWN diff.
-  const groupedFiles = await groupFilesByType(filesToProcess, (file) => getGitDiff([file]));
+  let groupedFiles = await groupFilesByType(filesToProcess, (file) => getGitDiff([file]));
+  groupedFiles = await resolveDependencies(groupedFiles);
   const groupCount = Object.keys(groupedFiles).length;
 
   console.log(chalk.cyan(`\n🤖 Auto-detected ${groupCount} different commit group(s). Preparing commits...\n`));
@@ -110,12 +154,13 @@ export async function commitCommand(options = {}) {
     const groupDiff = await getGitDiff(files);
     const groupStat = await getGitDiffStat(files);
 
+    const defaultType = detectedType === 'feat' && BRANCH_OVERRIDES.has(branchType) ? branchType : detectedType;
+
     // The branch scope only applies to groups of the branch's own type.
-    const branchApplies = branchType === detectedType;
-    const defaultScope = (branchApplies && branchScope) || detectScope(files);
+    const defaultScope = (branchType === defaultType && branchScope) || detectScope(files);
     const defaultDescription = await generateDescription(files, groupDiff, groupStat);
 
-    let defaults = { type: detectedType, scope: defaultScope, description: defaultDescription, isBreaking: false };
+    let defaults = { type: defaultType, scope: defaultScope, description: defaultDescription, isBreaking: false };
     let commitMsg = null;
     let skip = false;
 

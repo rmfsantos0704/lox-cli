@@ -102,12 +102,9 @@ export function getFileType(filePath, diffText = '', status = '') {
   if (isCommentOnly(lines, p)) return 'chore';
   if (isFormattingOnly(lines, p)) return 'style';
 
-  // Keywords are only trusted inside ADDED comments, not ordinary code.
-  const re = commentRegex(p);
-  const comments = re ? lines.filter(l => l[0] === '+' && re.test(l)).join('\n') : '';
-  if (/\b(fix(e[sd])?|bug(fix)?|hotfix|crash(es)?|regression)\b/i.test(comments)) return 'fix';
-  if (/\b(refactor(ed|ing)?|restructur\w*)\b/i.test(comments)) return 'refactor';
-
+  // Deliberately NO keyword guessing ("fix", "bug", "refactor" in comments): a tool
+  // that talks about commit types in its own source would misclassify itself.
+  // `fix` comes from a fix/ branch or from the user's own choice in the prompt.
   return 'feat';
 }
 
@@ -198,11 +195,46 @@ export function cleanModelOutput(raw = '') {
   return truncateAtWord(lowerFirst(s), 60);
 }
 
+const DECL_PATTERNS = [
+  /\bfunction\s*\*?\s*([A-Za-z_$][\w$]*)/,
+  /\b(?:const|let|var|class|interface|type|enum)\s+([A-Za-z_$][\w$]*)/,
+  /\bdef\s+([A-Za-z_]\w*)/,
+  /\bfunc\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)/,
+  /^[+-]\s*(?:async\s+|static\s+|public\s+|private\s+)*([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/ // method definitions
+];
+const NOT_NAMES = new Set(['if', 'for', 'while', 'switch', 'catch', 'return', 'function', 'else', 'with']);
+
+// Names declared in the changed lines: { added: [...], removed: [...] }.
+// "added" = declared on a + line (new or modified); "removed" = declared only on - lines.
+export function extractIdentifiers(lines = []) {
+  const collect = (prefix) => {
+    const found = new Set();
+    for (const l of lines) {
+      if (l[0] !== prefix) continue;
+      for (const re of DECL_PATTERNS) {
+        const m = l.match(re);
+        if (m && m[1] && !NOT_NAMES.has(m[1])) { found.add(m[1]); break; }
+      }
+    }
+    return found;
+  };
+  const added = collect('+');
+  const removed = [...collect('-')].filter(n => !added.has(n));
+  return { added: [...added].slice(0, 8), removed: removed.slice(0, 8) };
+}
+
 function buildSample(sections, budget = 1800) {
   const shown = sections.filter(s => !s.binary && s.lines.length).slice(0, 6);
   const per = Math.max(200, Math.floor(budget / Math.max(1, shown.length)));
   return shown
-    .map(s => `File: ${s.file}\n${s.lines.map(l => l.slice(0, 200)).join('\n').slice(0, per)}`)
+    .map(s => {
+      const { added, removed } = extractIdentifiers(s.lines);
+      const names = [
+        added.length ? `Added/changed names: ${added.join(', ')}` : '',
+        removed.length ? `Removed names: ${removed.join(', ')}` : ''
+      ].filter(Boolean).join('\n');
+      return `File: ${s.file}${names ? `\n${names}` : ''}\n${s.lines.map(l => l.slice(0, 200)).join('\n').slice(0, per)}`;
+    })
     .join('\n\n');
 }
 
@@ -246,7 +278,7 @@ export async function generateDescription(files = [], diffText = '', diffStat = 
 
     const examples = EXAMPLES.map((e, i) => `Example ${i + 1}:\nFile: ${e.files}\n${e.change}\nOutput: ${e.out}`).join('\n\n');
     const sample = buildSample(sections) || `Summary:\n${diffStat}`;
-    const prompt = `You write git commit descriptions. Summarize the change below as ONE line in imperative mood (e.g. "add", "fix", "update"), max 8 words, lowercase, no type prefix, no quotes, no trailing period. Only lines starting with + (added) or - (removed) are changes. Output ONLY the description.
+    const prompt = `You write git commit descriptions. Summarize the change below as ONE line in imperative mood (e.g. "add", "fix", "replace"), max 8 words, lowercase, no type prefix, no quotes, no trailing period. Be SPECIFIC: name the function, feature or behavior that changed (use the "names" lines when present). Avoid vague words such as "logic", "code", "utility", "improvements", "changes". Only lines starting with + (added) or - (removed) are changes. Output ONLY the description.
 
 ${examples}
 

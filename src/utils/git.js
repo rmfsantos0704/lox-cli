@@ -175,6 +175,18 @@ export async function getGitDiffStat(files = []) {
   return out;
 }
 
+// Reads a working-tree file by repo-relative path ('' if missing, binary-sized or unreadable).
+export async function readRepoFile(rel) {
+  try {
+    const abs = path.join(await getRepoRoot(), rel);
+    const stat = await fs.stat(abs);
+    if (!stat.isFile() || stat.size > 1024 * 1024) return '';
+    return await fs.readFile(abs, 'utf8');
+  } catch {
+    return '';
+  }
+}
+
 export async function getCurrentBranch() {
   try {
     const { stdout } = await git(['branch', '--show-current']);
