@@ -1,4 +1,4 @@
-import { execFile } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import util from 'util';
 import fs from 'fs/promises';
 import path from 'path';
@@ -136,10 +136,12 @@ async function listUntracked(paths) {
 
 // Diff of the given files against HEAD (-U0: only changed lines, no context),
 // with untracked files appended as synthetic additions.
-export async function getGitDiff(files = []) {
+// { staged: true } diffs only what is in the index (used after `git add -p`).
+export async function getGitDiff(files = [], { staged = false } = {}) {
   const paths = toPaths(files);
-  const base = await diffBase();
-  const args = ['diff', base, '-U0', '--no-color', '--no-ext-diff'];
+  const args = staged
+    ? ['diff', '--cached', '-U0', '--no-color', '--no-ext-diff']
+    : ['diff', await diffBase(), '-U0', '--no-color', '--no-ext-diff'];
   if (paths.length) args.push('--', ...paths);
 
   let out = '';
@@ -149,16 +151,19 @@ export async function getGitDiff(files = []) {
     debug(err);
   }
 
-  for (const rel of await listUntracked(paths)) {
-    out += await syntheticAddition(rel);
+  if (!staged) {
+    for (const rel of await listUntracked(paths)) {
+      out += await syntheticAddition(rel);
+    }
   }
   return out;
 }
 
-export async function getGitDiffStat(files = []) {
+export async function getGitDiffStat(files = [], { staged = false } = {}) {
   const paths = toPaths(files);
-  const base = await diffBase();
-  const args = ['diff', base, '--stat', '--no-color', '--no-ext-diff'];
+  const args = staged
+    ? ['diff', '--cached', '--stat', '--no-color', '--no-ext-diff']
+    : ['diff', await diffBase(), '--stat', '--no-color', '--no-ext-diff'];
   if (paths.length) args.push('--', ...paths);
 
   let out = '';
@@ -168,7 +173,7 @@ export async function getGitDiffStat(files = []) {
     debug(err);
   }
 
-  const untracked = await listUntracked(paths);
+  const untracked = staged ? [] : await listUntracked(paths);
   if (untracked.length) {
     out += `${out ? '\n' : ''}${untracked.map(p => ` ${p} (new file)`).join('\n')}`;
   }
@@ -184,6 +189,72 @@ export async function readRepoFile(rel) {
     return await fs.readFile(abs, 'utf8');
   } catch {
     return '';
+  }
+}
+
+// Every file git knows about or could add: tracked paths (as spelled in the index,
+// so their letter case is what git really has) plus untracked, non-ignored files.
+export async function listRepoFiles() {
+  try {
+    const { stdout } = await git(['ls-files', '-z', '--cached', '--others', '--exclude-standard']);
+    return stdout.split('\0').filter(Boolean);
+  } catch (err) {
+    debug(err);
+    return [];
+  }
+}
+
+// Paths that currently have staged changes.
+export async function getStagedPaths() {
+  try {
+    const { stdout } = await git(['diff', '--cached', '--name-only', '-z']);
+    return stdout.split('\0').filter(Boolean);
+  } catch (err) {
+    debug(err);
+    return [];
+  }
+}
+
+export async function resetPaths(paths = []) {
+  if (!paths.length) return;
+  try {
+    await git(['reset', '-q', '--', ...paths]);
+  } catch (err) {
+    debug(err);
+  }
+}
+
+// Runs an interactive `git add -p` for the given files so the user can pick hunks.
+// Untracked files are first marked intent-to-add, otherwise `add -p` skips them.
+// `input` (tests only) is piped to git instead of the terminal.
+export async function addPatch(files, { input } = {}) {
+  const untracked = files.filter(f => f.status === '??').map(f => f.path);
+  if (untracked.length) await git(['add', '-N', '--', ...untracked]);
+
+  const cwd = await getRepoRoot();
+  const paths = toPaths(files);
+  return new Promise((resolve) => {
+    const child = spawn('git', ['--literal-pathspecs', 'add', '-p', '--', ...paths], {
+      cwd,
+      stdio: input != null ? ['pipe', 'ignore', 'inherit'] : 'inherit'
+    });
+    if (input != null) {
+      child.stdin.on('error', () => {});
+      child.stdin.end(input);
+    }
+    child.on('error', () => resolve(false));
+    child.on('close', (code) => resolve(code === 0));
+  });
+}
+
+// Commits exactly what is staged (used for the hunks picked with `git add -p`).
+export async function commitStaged(commitMsg) {
+  try {
+    await git(['commit', '-m', commitMsg]);
+    return { ok: true };
+  } catch (err) {
+    const text = [err.stdout, err.stderr].filter(Boolean).join('\n').trim();
+    return { ok: false, error: text || err.message };
   }
 }
 

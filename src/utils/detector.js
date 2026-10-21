@@ -1,7 +1,7 @@
 import path from 'path';
 import chalk from 'chalk';
 import { getConfig } from './config.js';
-import { sanitizeScope, lowerFirst, truncateAtWord } from './formatter.js';
+import { sanitizeScope, lowerLeadingVerb, truncateAtWord } from './formatter.js';
 
 const norm = (p = '') => p.replace(/\\/g, '/');
 const GENERIC_DIRS = new Set(['', '.', 'src', 'app', 'lib', 'dist']);
@@ -158,9 +158,10 @@ export function detectScope(files = []) {
     common = common.slice(0, i);
   }
 
-  const last = common[common.length - 1] ?? '';
-  if (GENERIC_DIRS.has(last.toLowerCase())) return '';
-  return sanitizeScope(last);
+  // Deepest shared directory that is not generic: client/src -> "client",
+  // src/components -> "components", plain src -> no scope.
+  const meaningful = [...common].reverse().find(d => !GENERIC_DIRS.has(d.toLowerCase()));
+  return meaningful ? sanitizeScope(meaningful) : '';
 }
 
 /* ------------------------------------------------------------------ */
@@ -169,14 +170,20 @@ export function detectScope(files = []) {
 
 const EXAMPLES = [
   { files: 'src/api.js', change: '-console.log(msg)\n+logger.info(msg)', out: 'replace console logging with logger in api' },
-  { files: 'README.md', change: '+Contributions are welcome, see CONTRIBUTING.', out: 'add contribution notes to readme' },
-  { files: 'auth/session.js', change: '-if (token) return user\n+if (token && !isExpired(token)) return user', out: 'reject expired tokens in session check' }
+  { files: 'README.md', change: '+Contributions are welcome, see CONTRIBUTING.', out: 'add contribution notes to README.md' },
+  {
+    files: 'src/recipes.js',
+    names: 'Added/changed names: updateRecipe',
+    change: '-recipe.title = body.title\n+recipe.title = body.title ?? recipe.title',
+    out: 'keep title in updateRecipe when missing'
+  }
 ];
 
 const VERBS = { adds: 'add', fixes: 'fix', removes: 'remove', updates: 'update', changes: 'change', improves: 'improve', refactors: 'refactor' };
 
-// Cleans raw model output into a bare, imperative description (or '' if unusable).
-export function cleanModelOutput(raw = '') {
+// Cleans raw model output into a bare description (or '' if unusable).
+// Identifiers, filenames and acronyms are kept EXACTLY as the model wrote them.
+export function cleanModelOutput(raw = '', max = 60) {
   let s = String(raw)
     .replace(/<think>[\s\S]*?<\/think>/gi, '')
     .replace(/<think>[\s\S]*$/i, '')
@@ -190,9 +197,29 @@ export function cleanModelOutput(raw = '') {
   // The colon is REQUIRED, otherwise "fix login bug" would lose its verb.
   s = s.replace(new RegExp(`^(${TYPES})(\\([^)]*\\))?!?:\\s*`, 'i'), '');
   s = unquote(s);
-  s = s.replace(/[.!,;:\s]+$/, '');
+  s = s.replace(/\.$/, '').trim(); // only ONE trailing dot, nothing else is touched
   s = s.replace(/^(adds|fixes|removes|updates|changes|improves|refactors)\b/i, m => VERBS[m.toLowerCase()]);
-  return truncateAtWord(lowerFirst(s), 60);
+  return truncateAtWord(lowerLeadingVerb(s), max);
+}
+
+// Dotfiles whose bare name models like to write without the dot ("update gitignore").
+// Deliberately NOT every dotfile: ".env" -> "env" is also a normal word.
+const DOTFILE_STEM = /(rc|ignore|attributes|editorconfig)$/i;
+const escapeRe = (t) => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// Puts back file names the model mangled: restores letter case ("readme.md" ->
+// "README.md") and the leading dot ("gitignore" -> ".gitignore").
+export function restoreFileNames(description, files = []) {
+  let out = description;
+  const names = new Set(files.map(f => path.basename(f.path)).filter(Boolean));
+  for (const name of names) {
+    out = out.replace(new RegExp(`(?<![\\w./-])${escapeRe(name)}(?![\\w-])`, 'gi'), name);
+    if (name.startsWith('.') && DOTFILE_STEM.test(name.slice(1))) {
+      // not preceded by "." (so an already-dotted name is never doubled)
+      out = out.replace(new RegExp(`(?<![\\w./-])${escapeRe(name.slice(1))}(?![\\w-])`, 'gi'), name);
+    }
+  }
+  return out;
 }
 
 const DECL_PATTERNS = [
@@ -202,45 +229,365 @@ const DECL_PATTERNS = [
   /\bfunc\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)/,
   /^[+-]\s*(?:async\s+|static\s+|public\s+|private\s+)*([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{/ // method definitions
 ];
-const NOT_NAMES = new Set(['if', 'for', 'while', 'switch', 'catch', 'return', 'function', 'else', 'with']);
+const NOT_NAMES = new Set(['if', 'for', 'while', 'switch', 'catch', 'return', 'function', 'else', 'with', 'Props', 'props', 'State']);
 
 // Names declared in the changed lines: { added: [...], removed: [...] }.
 // "added" = declared on a + line (new or modified); "removed" = declared only on - lines.
+// Top-level declarations (no indentation: components, exported functions) are listed
+// before nested ones (local variables), because they describe a change better.
 export function extractIdentifiers(lines = []) {
   const collect = (prefix) => {
-    const found = new Set();
+    const top = new Set();
+    const nested = new Set();
     for (const l of lines) {
       if (l[0] !== prefix) continue;
       for (const re of DECL_PATTERNS) {
         const m = l.match(re);
-        if (m && m[1] && !NOT_NAMES.has(m[1])) { found.add(m[1]); break; }
+        if (m && m[1] && !NOT_NAMES.has(m[1])) {
+          (/^[+-]\S/.test(l) ? top : nested).add(m[1]);
+          break;
+        }
       }
     }
-    return found;
+    return [...top, ...[...nested].filter(n => !top.has(n))];
   };
   const added = collect('+');
-  const removed = [...collect('-')].filter(n => !added.has(n));
-  return { added: [...added].slice(0, 8), removed: removed.slice(0, 8) };
+  const addedSet = new Set(added);
+  const removed = collect('-').filter(n => !addedSet.has(n));
+  return { added: added.slice(0, 8), removed: removed.slice(0, 8) };
+}
+
+// "File: path" + declared names + the changed lines (cut to `per` characters).
+function sampleFor(section, per) {
+  const { added, removed } = extractIdentifiers(section.lines);
+  const names = [
+    added.length ? `Added/changed names: ${added.join(', ')}` : '',
+    removed.length ? `Removed names: ${removed.join(', ')}` : ''
+  ].filter(Boolean).join('\n');
+  return `File: ${section.file}${names ? `\n${names}` : ''}\n${section.lines.map(l => l.slice(0, 200)).join('\n').slice(0, per)}`;
 }
 
 function buildSample(sections, budget = 1800) {
   const shown = sections.filter(s => !s.binary && s.lines.length).slice(0, 6);
   const per = Math.max(200, Math.floor(budget / Math.max(1, shown.length)));
-  return shown
-    .map(s => {
-      const { added, removed } = extractIdentifiers(s.lines);
-      const names = [
-        added.length ? `Added/changed names: ${added.join(', ')}` : '',
-        removed.length ? `Removed names: ${removed.join(', ')}` : ''
-      ].filter(Boolean).join('\n');
-      return `File: ${s.file}${names ? `\n${names}` : ''}\n${s.lines.map(l => l.slice(0, 200)).join('\n').slice(0, per)}`;
-    })
-    .join('\n\n');
+  return shown.map(s => sampleFor(s, per)).join('\n\n');
 }
 
 function fallbackDescription(files) {
   return files.length === 1 ? `update ${path.basename(files[0].path)}` : `update ${files.length} project files`;
 }
+
+/* ------------------------------------------------------------------ */
+/* Ollama                                                               */
+/* ------------------------------------------------------------------ */
+
+// After a connection failure, later calls in the same run are skipped silently
+// instead of printing the same warning for every group.
+let aiDown = false;
+export function resetAiState() { aiDown = false; }
+
+function aiSettings() {
+  let model = 'llama3.2';
+  let baseUrl = 'http://127.0.0.1:11434';
+  try {
+    const config = getConfig();
+    if (config?.model) model = config.model;
+    if (config?.ollamaUrl) baseUrl = String(config.ollamaUrl).replace(/\/+$/, '');
+  } catch { /* config problems are reported by the caller */ }
+  return { model, baseUrl };
+}
+
+// Returns { text, model } or null when the model is unavailable.
+async function askOllama(prompt, { json = false, numPredict = 40, timeoutMs = 45000 } = {}) {
+  if (aiDown) return null;
+  const { model, baseUrl } = aiSettings();
+  try {
+    const response = await fetch(`${baseUrl}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        prompt,
+        stream: false,
+        ...(json ? { format: 'json' } : {}),
+        // num_ctx: Ollama's default window is only 4096 tokens, too small for big groups.
+        options: { temperature: 0, num_predict: numPredict, num_ctx: 8192 }
+      }),
+      signal: AbortSignal.timeout(timeoutMs) // a cold model load can take a while
+    });
+
+    if (!response.ok) {
+      const hint = response.status === 404 ? ` Is the model installed? Try: ollama pull ${model}` : '';
+      console.log(chalk.yellow(`⚠️ AI detection skipped (Ollama returned HTTP ${response.status}).${hint}`));
+      return null;
+    }
+    const data = await response.json();
+    return { text: data.response ?? '', model };
+  } catch (err) {
+    const timedOut = err.name === 'TimeoutError' || err.name === 'AbortError';
+    if (!timedOut) aiDown = true;
+    console.log(chalk.yellow(`⚠️ AI detection skipped (${timedOut ? 'timed out' : 'Ollama offline'})`));
+    return null;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Change analysis: type + mixed-change detection                       */
+/* ------------------------------------------------------------------ */
+
+const ANALYSIS_TYPES = new Set(['feat', 'fix', 'chore']);
+
+// Parses the model's JSON: { changes: [{ type, file, summary }] }.
+// Returns { type, changes, mixed } or null when nothing usable came back.
+//   mixed = the diff contains BOTH a bug fix and a new feature.
+export function parseAnalysis(raw) {
+  const text = String(raw ?? '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    const m = text.match(/\{[\s\S]*\}/);
+    if (!m) return null;
+    try { data = JSON.parse(m[0]); } catch { return null; }
+  }
+
+  const list = Array.isArray(data?.changes) ? data.changes : (data?.type ? [data] : []);
+  const changes = list
+    .map(c => ({
+      type: String(c?.type ?? '').toLowerCase().trim(),
+      file: String(c?.file ?? '').trim(),
+      summary: String(c?.summary ?? '').trim()
+    }))
+    .filter(c => ANALYSIS_TYPES.has(c.type));
+  if (changes.length === 0) return null;
+
+  return { ...summarizeTypes(changes), changes };
+}
+
+// Overall type of a list of changes, and whether it mixes a fix with a feature.
+function summarizeTypes(changes) {
+  const types = new Set(changes.map(c => c.type));
+  return {
+    type: types.has('feat') ? 'feat' : types.has('fix') ? 'fix' : 'chore',
+    mixed: types.has('feat') && types.has('fix')
+  };
+}
+
+const ANALYSIS_EXAMPLES = `Example 1:
+File: src/parser.js
+-const parser = new Parser({ strict: true })
++const parser = new Parser({ strict: false })
+Answer: {"changes":[{"type":"chore","file":"src/parser.js","summary":"switch parser strict option"}]}
+
+Example 2:
+File: src/recipes.js
+Added/changed names: updateRecipe
+-recipe.title = body.title
++recipe.title = body.title ?? recipe.title
+Answer: {"changes":[{"type":"fix","file":"src/recipes.js","summary":"keep title in updateRecipe when missing"}]}
+
+Example 3:
+File: src/recipes.js
+Added/changed names: updateRecipe, shareRecipe
+-recipe.title = body.title
++recipe.title = body.title ?? recipe.title
++export function shareRecipe(id) {
++  return createShareLink(id)
++}
+Answer: {"changes":[{"type":"fix","file":"src/recipes.js","summary":"keep title in updateRecipe when missing"},{"type":"feat","file":"src/recipes.js","summary":"add shareRecipe"}]}`;
+
+// Asks the model to list each DISTINCT change in the diff with a type of
+// feat, fix or chore. Returns { type, changes, mixed } or null (model unavailable
+// or unusable output, so callers keep their own default).
+export async function analyzeGroup(files = [], diffText = '', diffStat = '') {
+  const sections = splitDiff(diffText).filter(s => !s.binary && s.lines.length > 0);
+  if (sections.length === 0) return null;
+
+  const { model } = aiSettings();
+  console.log(chalk.gray(`\n⏳ [AI Active (${model})]: Classifying changes...`));
+
+  const prompt = `You classify code changes for a git commit. List each DISTINCT change in the diff below.
+"type" must be exactly one of:
+- feat: adds a new capability, function, option or behavior
+- fix: corrects wrong behavior (a bug)
+- chore: a library or tool option swap, a configuration tweak, dependency or tooling updates, renames or cleanup with no behavior change
+A library option swap or a config tweak is ALWAYS chore. Lines that serve the same purpose are ONE change. Only lines starting with + (added) or - (removed) are changes.
+Reply with JSON only, in the form {"changes":[{"type":"feat|fix|chore","file":"path","summary":"3 to 8 words"}]}. Keep identifiers exactly as written.
+
+${ANALYSIS_EXAMPLES}
+
+Now the real change:
+${diffStat.trim() ? `Summary:\n${diffStat}\n\n` : ''}${buildSample(sections, 2600)}
+Answer:`;
+
+  const reply = await askOllama(prompt, { json: true, numPredict: 300 });
+  if (!reply) return null;
+
+  const analysis = parseAnalysis(reply.text);
+  if (!analysis) {
+    console.log(chalk.yellow('⚠️ [AI Guard]: Could not read the model\'s classification, using the detected type.'));
+    return null;
+  }
+  console.log(chalk.magenta(`🧠 [Ollama AI Active (${reply.model})]: type "${analysis.type}"${analysis.mixed ? ' (mixed fix + feat)' : ''}`));
+  return analysis;
+}
+
+/* ------------------------------------------------------------------ */
+/* Big groups: one summary per file, then a title                       */
+/* ------------------------------------------------------------------ */
+
+// A single "max 8 words" line cannot describe a dozen files, and sampling only the
+// first few files hides the rest from the model. From this many files on, EVERY file
+// is read (in batches), each gets its own type + summary, and those summaries become
+// the commit body, with a short title written from all of them.
+export const BIG_GROUP_FILES = 4;
+const BATCH_MAX_FILES = 5;
+const BATCH_MAX_CHARS = 3200;
+const PER_FILE_CHARS = 800;
+
+const TYPE_RULES = `"type" must be exactly one of:
+- feat: adds a new capability, function, option or behavior
+- fix: corrects wrong behavior (a bug)
+- chore: a library or tool option swap, a configuration tweak, dependency or tooling updates, renames or cleanup with no behavior change
+A library option swap or a config tweak is ALWAYS chore.`;
+
+function batchSections(sections) {
+  const batches = [];
+  let cur = [];
+  let chars = 0;
+  for (const section of sections) {
+    const sample = sampleFor(section, PER_FILE_CHARS);
+    if (cur.length && (cur.length >= BATCH_MAX_FILES || chars + sample.length > BATCH_MAX_CHARS)) {
+      batches.push(cur);
+      cur = [];
+      chars = 0;
+    }
+    cur.push({ section, sample });
+    chars += sample.length;
+  }
+  if (cur.length) batches.push(cur);
+  return batches;
+}
+
+// Parses {"files":[{ "file", "type", "summary" }]} (an array is accepted too).
+// Returns [{ file, type, summary }] and drops entries without a usable summary.
+export function parseFileSummaries(raw) {
+  const text = String(raw ?? '').replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    const m = text.match(/[[{][\s\S]*[\]}]/);
+    if (!m) return [];
+    try { data = JSON.parse(m[0]); } catch { return []; }
+  }
+  const list = Array.isArray(data) ? data
+    : Array.isArray(data?.files) ? data.files
+    : Array.isArray(data?.changes) ? data.changes
+    : [];
+  return list
+    .map(e => ({
+      file: String(e?.file ?? '').trim(),
+      type: String(e?.type ?? '').toLowerCase().trim(),
+      summary: cleanModelOutput(String(e?.summary ?? ''), 70)
+    }))
+    .filter(e => e.summary);
+}
+
+// The model may answer with the full path, the bare file name, or in order.
+function matchEntry(entries, section, index, batchLength) {
+  const base = path.basename(section.file);
+  return entries.find(e => e.file === section.file)
+    || entries.find(e => e.file && (section.file.endsWith(`/${e.file}`) || path.basename(e.file) === base))
+    || (entries.length === batchLength ? entries[index] : undefined);
+}
+
+const BATCH_EXAMPLE = `Example:
+File: src/api.ts
+Added/changed names: getItems
++export async function getItems() { return request('/items') }
+File: src/Layout.tsx
+-<NavLink to="/items">Items</NavLink>
++<NavLink to="/library">Library</NavLink>
+Answer: {"files":[{"file":"src/api.ts","type":"feat","summary":"add getItems request"},{"file":"src/Layout.tsx","type":"feat","summary":"point nav link to the library page"}]}`;
+
+const TITLE_EXAMPLE = `Example:
+- api.ts: add getItems request
+- Library.tsx: show items grouped by tag
+- Layout.tsx: link nav to the Library page
+- ItemCard.tsx: show tag chips
+Title: add Library page with tag grouping`;
+
+// Returns { description, body, analysis } or null (fewer than BIG_GROUP_FILES files,
+// or the model is unavailable, so the caller keeps its normal path).
+//   body     = one bullet per file ("- Library.tsx: show items grouped by tag")
+//   analysis = { type, mixed, changes } built from the per-file types
+export async function describeGroup(files = [], diffText = '') {
+  const sections = splitDiff(diffText).filter(s => !s.binary && s.lines.length > 0);
+  if (sections.length < BIG_GROUP_FILES) return null;
+
+  const batches = batchSections(sections);
+  const { model } = aiSettings();
+  console.log(chalk.gray(`\n⏳ [AI Active (${model})]: Reading all ${sections.length} files (${batches.length} batch${batches.length === 1 ? '' : 'es'})...`));
+
+  const changes = [];
+  let understood = 0;
+  for (const batch of batches) {
+    const prompt = `You summarize code changes for a git commit. For EACH file below write one summary of 3 to 10 words in imperative mood (e.g. "add", "fix", "replace") saying what changed in that file, and classify it.
+${TYPE_RULES}
+Name the component, function or behavior that changed (use the "names" lines when present). Keep identifiers exactly as written. Avoid vague words such as "logic", "code", "utility", "improvements", "changes". Only lines starting with + (added) or - (removed) are changes.
+Reply with JSON only: {"files":[{"file":"path","type":"feat|fix|chore","summary":"..."}]} with exactly one entry per file, in the same order.
+
+${BATCH_EXAMPLE}
+
+Now the real files:
+${batch.map(b => b.sample).join('\n\n')}
+Answer:`;
+
+    const reply = await askOllama(prompt, { json: true, numPredict: 90 * batch.length + 60 });
+    if (!reply && aiDown) return null;
+    const entries = reply ? parseFileSummaries(reply.text) : [];
+
+    batch.forEach(({ section }, i) => {
+      const e = matchEntry(entries, section, i, batch.length);
+      if (e) understood++;
+      changes.push({
+        file: section.file,
+        type: ANALYSIS_TYPES.has(e?.type) ? e.type : 'feat',
+        summary: e?.summary || `update ${path.basename(section.file)}`
+      });
+    });
+  }
+  if (understood === 0) return null;
+
+  // Bullet label: the bare file name, or the last two path parts when names collide.
+  const counts = {};
+  for (const c of changes) counts[path.basename(c.file)] = (counts[path.basename(c.file)] || 0) + 1;
+  const label = (f) => (counts[path.basename(f)] > 1 ? f.split('/').slice(-2).join('/') : path.basename(f));
+  const body = changes.map(c => `- ${label(c.file)}: ${c.summary}`).join('\n');
+
+  // One short title that covers every summary.
+  const titlePrompt = `You write git commit titles. Below is a one-line summary of every change in a commit. Write ONE title: imperative mood, starting with a lowercase verb, max 10 words, no type prefix, no quotes, no trailing period. Mention the main things that changed; when there are more than three separate things, name the overall theme instead of listing them. Keep identifiers and file names exactly as written. Output ONLY the title.
+
+${TITLE_EXAMPLE}
+
+Changes:
+${changes.map(c => `- ${label(c.file)}: ${c.summary}`).join('\n')}
+Title:`;
+
+  const reply = await askOllama(titlePrompt, { numPredict: 60 });
+  let description = reply ? restoreFileNames(cleanModelOutput(reply.text, 64), files) : '';
+  const parroted = /^add Library page with tag grouping$/i.test(description);
+  if (!description || parroted || /^(none|n\/a)$/i.test(description)) description = `update ${files.length} project files`;
+
+  const analysis = { ...summarizeTypes(changes), changes };
+  console.log(chalk.magenta(`🧠 [Ollama AI Active (${model})]: "${description}" (${changes.length} files read, type "${analysis.type}"${analysis.mixed ? ', mixed fix + feat' : ''})`));
+  return { description, body, analysis };
+}
+
+/* ------------------------------------------------------------------ */
+/* Description                                                          */
+/* ------------------------------------------------------------------ */
 
 export async function generateDescription(files = [], diffText = '', diffStat = '') {
   if (files.length === 0) return 'update project files';
@@ -266,19 +613,14 @@ export async function generateDescription(files = [], diffText = '', diffStat = 
 
   // 4. Local AI via Ollama
   if (withLines.length > 0 || diffStat.trim()) {
-    let model = 'llama3.2';
-    let baseUrl = 'http://127.0.0.1:11434';
-    try {
-      const config = getConfig();
-      if (config?.model) model = config.model;
-      if (config?.ollamaUrl) baseUrl = String(config.ollamaUrl).replace(/\/+$/, '');
-    } catch { /* config problems are reported by the caller */ }
+    const { model } = aiSettings();
+    console.log(chalk.gray(`\n⏳ [AI Active (${model})]: Describing changes...`));
 
-    console.log(chalk.gray(`\n⏳ [AI Active (${model})]: Analyzing code changes...`));
-
-    const examples = EXAMPLES.map((e, i) => `Example ${i + 1}:\nFile: ${e.files}\n${e.change}\nOutput: ${e.out}`).join('\n\n');
+    const examples = EXAMPLES
+      .map((e, i) => `Example ${i + 1}:\nFile: ${e.files}\n${e.names ? `${e.names}\n` : ''}${e.change}\nOutput: ${e.out}`)
+      .join('\n\n');
     const sample = buildSample(sections) || `Summary:\n${diffStat}`;
-    const prompt = `You write git commit descriptions. Summarize the change below as ONE line in imperative mood (e.g. "add", "fix", "replace"), max 8 words, lowercase, no type prefix, no quotes, no trailing period. Be SPECIFIC: name the function, feature or behavior that changed (use the "names" lines when present). Avoid vague words such as "logic", "code", "utility", "improvements", "changes". Only lines starting with + (added) or - (removed) are changes. Output ONLY the description.
+    const prompt = `You write git commit descriptions. Summarize the change below as ONE line, max 8 words, starting with a lowercase imperative verb (e.g. "add", "fix", "replace"). Keep every identifier, function name and file name EXACTLY as written: same capitalization, leading dots included (e.g. parseJSON, README.md, .gitignore). No type prefix, no quotes, no trailing period. Be SPECIFIC: name the function, feature or behavior that changed (use the "names" lines when present). Avoid vague words such as "logic", "code", "utility", "improvements", "changes". Only lines starting with + (added) or - (removed) are changes. Output ONLY the description.
 
 ${examples}
 
@@ -286,33 +628,18 @@ Now the real change:
 ${diffStat.trim() ? `Summary:\n${diffStat}\n\n` : ''}${sample}
 Output:`;
 
-    try {
-      const response = await fetch(`${baseUrl}/api/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model, prompt, stream: false, options: { temperature: 0, num_predict: 40 } }),
-        signal: AbortSignal.timeout(45000) // a cold model load can take a while
-      });
+    const reply = await askOllama(prompt);
+    if (reply) {
+      const desc = restoreFileNames(cleanModelOutput(reply.text), files);
+      const parroted = EXAMPLES.some(e => e.out.toLowerCase() === desc.toLowerCase());
+      const garbage = /binary file|unmarked|context lines?|^(none|n\/a)$/i.test(desc);
 
-      if (!response.ok) {
-        const hint = response.status === 404 ? ` Is the model installed? Try: ollama pull ${model}` : '';
-        console.log(chalk.yellow(`⚠️ AI detection skipped (Ollama returned HTTP ${response.status}).${hint}`));
+      if (!desc || parroted || garbage) {
+        console.log(chalk.yellow('⚠️ [AI Guard]: Unusable model output, using a plain fallback.'));
       } else {
-        const data = await response.json();
-        const desc = cleanModelOutput(data.response);
-        const parroted = EXAMPLES.some(e => e.out === desc.toLowerCase());
-        const garbage = /binary file|unmarked|context lines?|^(none|n\/a)$/i.test(desc);
-
-        if (!desc || parroted || garbage) {
-          console.log(chalk.yellow('⚠️ [AI Guard]: Unusable model output, using a plain fallback.'));
-        } else {
-          console.log(chalk.magenta(`🧠 [Ollama AI Active (${model})]: "${desc}"`));
-          return desc;
-        }
+        console.log(chalk.magenta(`🧠 [Ollama AI Active (${reply.model})]: "${desc}"`));
+        return desc;
       }
-    } catch (err) {
-      const reason = err.name === 'TimeoutError' || err.name === 'AbortError' ? 'timed out' : 'Ollama offline';
-      console.log(chalk.yellow(`⚠️ AI detection skipped (${reason})`));
     }
   }
 

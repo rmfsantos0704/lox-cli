@@ -21,9 +21,19 @@ export function sanitizeScope(scope = '', maxLen = 24) {
   return s;
 }
 
-// "Add x" -> "add x", but leave "API", "JSON", "parseJSON", "README" untouched.
-export function lowerFirst(text = '') {
-  return /^[A-Z][a-z]/.test(text) ? text[0].toLowerCase() + text.slice(1) : text;
+// Conventional commits start with a lowercase imperative verb ("Add x" -> "add x").
+// ONLY a leading verb is lowercased. Identifiers, filenames and acronyms are kept
+// exactly as written ("UserStore ...", "README.md ...", "API ...", "parseJSON ...").
+const LEADING_VERBS = new Set([
+  'add', 'adjust', 'allow', 'bump', 'change', 'clean', 'configure', 'correct', 'disable', 'drop',
+  'enable', 'extract', 'fix', 'handle', 'implement', 'improve', 'introduce', 'make', 'merge', 'move',
+  'prevent', 'refactor', 'remove', 'rename', 'replace', 'restore', 'revert', 'rewrite', 'set',
+  'simplify', 'split', 'support', 'switch', 'tweak', 'update', 'use'
+]);
+
+export function lowerLeadingVerb(text = '') {
+  const m = text.match(/^([A-Z][a-z]+)\b/);
+  return m && LEADING_VERBS.has(m[1].toLowerCase()) ? m[1].toLowerCase() + text.slice(m[1].length) : text;
 }
 
 // Cut at a word boundary instead of mid-word.
@@ -34,18 +44,46 @@ export function truncateAtWord(text, max) {
   return (i > 0 ? cut.slice(0, i) : text.slice(0, max)).replace(/[\s.,;:-]+$/, '');
 }
 
-export function formatCommitMessage({ type, scope, description, isBreaking, breakingDesc }) {
+// Wraps body text to `width` columns. Bullet lines ("- file: text") keep a hanging indent.
+export function wrapBody(body = '', width = 72) {
+  return String(body).split('\n').map((line) => {
+    if (line.length <= width) return line;
+    const lead = (/^(\s*[-*]\s+)/.exec(line) || [''])[0];
+    const indent = ' '.repeat(lead.length);
+    const words = line.slice(lead.length).split(/\s+/).filter(Boolean);
+    const out = [];
+    let cur = lead;
+    let empty = true;
+    for (const w of words) {
+      if (!empty && cur.length + 1 + w.length > width) {
+        out.push(cur);
+        cur = indent + w;
+      } else {
+        cur += (empty ? '' : ' ') + w;
+      }
+      empty = false;
+    }
+    out.push(cur);
+    return out.join('\n');
+  }).join('\n');
+}
+
+export function formatCommitMessage({ type, scope, description, body, isBreaking, breakingDesc }) {
   const s = sanitizeScope(scope);
   const prefix = `${type}${s ? `(${s})` : ''}${isBreaking ? '!' : ''}: `;
 
+  // Only ONE trailing "." is stripped (a rule of the header, not a rewrite of the text).
   let desc = String(description ?? '')
     .trim()
     .replace(/\s+/g, ' ')
-    .replace(/[.\s]+$/, '');
-  desc = lowerFirst(desc);
+    .replace(/\.$/, '')
+    .trim();
+  desc = lowerLeadingVerb(desc);
   desc = truncateAtWord(desc, Math.max(10, MAX_HEADER - prefix.length));
 
   let message = `${prefix}${desc}`;
+  const bodyText = String(body ?? '').trim();
+  if (bodyText) message += `\n\n${wrapBody(bodyText)}`;
   if (isBreaking && breakingDesc && breakingDesc.trim()) {
     message += `\n\nBREAKING CHANGE: ${breakingDesc.trim()}`;
   }
